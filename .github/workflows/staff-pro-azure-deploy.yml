@@ -1,0 +1,95 @@
+name: Staff Pro Azure Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "staff-frontend/**"
+      - "staff-backend/**"
+      - ".github/workflows/staff-pro-azure-deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: staff-pro-azure-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FRONTEND_PATH: staff-frontend
+      FRONTEND_DIST_PATH: staff-frontend/dist
+      API_PROJECT_PATH: staff-backend/src/StaffPro.Api/StaffPro.Api.csproj
+      API_WWWROOT_PATH: staff-backend/src/StaffPro.Api/wwwroot
+      API_PUBLISH_PATH: staff-backend/artifacts/publish-azure
+      API_ZIP_PATH: staff-backend/artifacts/staffpro-azure.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install frontend dependencies
+        working-directory: ${{ env.FRONTEND_PATH }}
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ${{ env.FRONTEND_PATH }}
+        run: node ./node_modules/vite/bin/vite.js build
+
+      - name: Copy frontend build into API wwwroot
+        run: |
+          rm -rf "${{ env.API_WWWROOT_PATH }}"
+          mkdir -p "${{ env.API_WWWROOT_PATH }}"
+          cp -R "${{ env.FRONTEND_DIST_PATH }}/." "${{ env.API_WWWROOT_PATH }}/"
+
+      - name: Publish backend API
+        run: dotnet publish "${{ env.API_PROJECT_PATH }}" -c Release -o "${{ env.API_PUBLISH_PATH }}"
+
+      - name: Package backend API
+        run: |
+          rm -f "${{ env.API_ZIP_PATH }}"
+          cd "${{ env.API_PUBLISH_PATH }}"
+          zip -r "../staffpro-azure.zip" .
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Select Azure subscription
+        run: az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Deploy to Azure Web App
+        run: |
+          az webapp deploy \
+            --resource-group "${{ secrets.STAFFPRO_AZURE_RESOURCE_GROUP }}" \
+            --name "${{ secrets.STAFFPRO_AZURE_WEBAPP_NAME }}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --src-path "${{ env.API_ZIP_PATH }}" \
+            --type zip
+
+      - name: Restart web app
+        run: |
+          az webapp restart \
+            --resource-group "${{ secrets.STAFFPRO_AZURE_RESOURCE_GROUP }}" \
+            --name "${{ secrets.STAFFPRO_AZURE_WEBAPP_NAME }}"
+
+      - name: Smoke test
+        run: |
+          curl -I --fail "https://${{ secrets.STAFFPRO_AZURE_WEBAPP_NAME }}.azurewebsites.net/"
+          curl -I "https://${{ secrets.STAFFPRO_AZURE_WEBAPP_NAME }}.azurewebsites.net/api/auth/me"
